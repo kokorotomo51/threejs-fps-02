@@ -132,5 +132,9 @@ export function createSfx() {
     throwPin() {
       tone(600, 0.03, 'square', 0.1);
     },
+    pop() {
+      tone(2400, 0.08, 'sine', 0.18);
+      burst(0.06, 0.25, 4000, 'highpass');
+    },
   };
 }

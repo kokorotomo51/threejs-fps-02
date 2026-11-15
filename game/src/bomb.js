@@ -63,6 +63,17 @@ export function createBomb(scene, sfx, onExploded) {
       }
       return false;
     },
+    // Staging hook for ?shot= captures: a bomb already planted, fuse running.
+    forcePlant(site, pos, now) {
+      state.mode = 'planted';
+      state.site = site;
+      state.pos.copy(pos);
+      state.plantT = PLANT_TIME;
+      state.fuse = FUSE_TIME;
+      state.beepAt = now;
+      group.position.set(pos.x, 0.1, pos.z);
+      group.visible = true;
+    },
     // Runs the fuse; returns true the moment the bomb goes off.
     step(dt, now) {
       blast.step(dt);

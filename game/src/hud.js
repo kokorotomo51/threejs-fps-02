@@ -2,7 +2,7 @@
 // spread, damage flash and the overlay panels (menu, pause, buy, match end). It
 // never touches the simulation; main.js pushes numbers in and reads callbacks out.
 // Every write is cached, so the DOM is only touched when a value actually changes.
-import { WEAPONS, GRENADE, BUY_ORDER } from './weapons.js';
+import { WEAPONS, GRENADE, SMOKE, FLASH, ARMOR, BUY_ORDER } from './weapons.js';
 
 const COPY = {
   start: {
@@ -40,6 +40,9 @@ export function createHud() {
   const ammoReserve = $('ammo-reserve');
   const weaponName = $('weapon-name');
   const grenadeEl = $('grenades');
+  const armorEl = $('armor');
+  const smokeEl = $('smoke');
+  const flashEl = $('flash');
   const bombEl = $('bomb-status');
   const bombTimer = $('bomb-timer');
   const bombFill = $('bomb-fill');
@@ -64,7 +67,11 @@ export function createHud() {
   let lastMag = -1;
   let lastReserve = -1;
   let lastWeapon = '';
-  let lastGrenades = -1;
+  let lastGrenades = '';
+  let lastArmor = -1;
+  let lastSmoke = -1;
+  let lastFlash = -1;
+  let lastScoped = false;
   let lastGap = -1;
   let lastBuyTimer = '';
   let buyHandler = null;
@@ -78,6 +85,9 @@ export function createHud() {
     buyRows.innerHTML = '';
     const items = BUY_ORDER.map((id) => ({ id, name: WEAPONS[id].name, price: WEAPONS[id].price, key: String(BUY_ORDER.indexOf(id) + 1) }));
     items.push({ id: 'grenade', name: GRENADE.name, price: GRENADE.price, key: '6' });
+    items.push({ id: 'smoke', name: SMOKE.name, price: SMOKE.price, key: '7' });
+    items.push({ id: 'flash', name: FLASH.name, price: FLASH.price, key: '8' });
+    items.push({ id: 'armor', name: ARMOR.name, price: ARMOR.price, key: '9' });
     for (const item of items) {
       const row = document.createElement('button');
       row.type = 'button';
@@ -116,7 +126,7 @@ export function createHud() {
       lastScore = text;
       scoreEl.textContent = text;
     },
-    setAmmo(mag, reserve, name, grenades) {
+    setAmmo(mag, reserve, name, utilText) {
       if (mag !== lastMag || reserve !== lastReserve) {
         lastMag = mag;
         lastReserve = reserve;
@@ -128,10 +138,35 @@ export function createHud() {
         lastWeapon = name;
         weaponName.textContent = name;
       }
-      if (grenades !== lastGrenades) {
-        lastGrenades = grenades;
-        grenadeEl.textContent = grenades > 0 ? `HE x${grenades}` : '';
+      if (utilText !== lastGrenades) {
+        lastGrenades = utilText;
+        grenadeEl.textContent = utilText;
       }
+    },
+    setArmor(n) {
+      if (n === lastArmor) return;
+      lastArmor = n;
+      armorEl.textContent = n > 0 ? `ARMOR ${n}` : '';
+    },
+    // 0..1 grey over the screen while the camera stands in smoke.
+    setSmoke(amount) {
+      const v = Math.round(amount * 20) / 20;
+      if (v === lastSmoke) return;
+      lastSmoke = v;
+      smokeEl.style.opacity = String(v * 0.85);
+    },
+    // 0..1 white over the screen while flashed; the caller decays it.
+    setFlash(amount) {
+      const v = Math.round(amount * 20) / 20;
+      if (v === lastFlash) return;
+      lastFlash = v;
+      flashEl.style.opacity = String(v);
+    },
+    // Scoped in: the crosshair goes away, the scope is the aim.
+    setScoped(scoped) {
+      if (scoped === lastScoped) return;
+      lastScoped = scoped;
+      crosshair.style.opacity = scoped ? '0' : '';
     },
     setCrosshair(spread) {
       const gap = Math.max(4, Math.min(26, 4 + spread * 420));
@@ -215,7 +250,7 @@ export function createHud() {
       }
       for (const row of buyRows.children) {
         const id = row.dataset.id;
-        const price = id === 'grenade' ? GRENADE.price : WEAPONS[id].price;
+        const price = id === 'grenade' ? GRENADE.price : id === 'smoke' ? SMOKE.price : id === 'flash' ? FLASH.price : id === 'armor' ? ARMOR.price : WEAPONS[id].price;
         row.classList.toggle('owned', !!owned[id]);
         row.classList.toggle('cant', money < price && !owned[id]);
       }

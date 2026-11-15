@@ -9,11 +9,17 @@ import { colour } from './palette.js';
 export const WEAPONS = {
   pistol: { id: 'pistol', name: 'P9 Sidearm', kind: 'pistol', price: 0, damage: 26, headMul: 2.5, mag: 12, reserve: 48, auto: false, gap: 0.16, reload: 1.4, spreadStill: 0.004, spreadMove: 0.03, recoil: 0.012, speed: 5.4, barrel: 0.22 },
   smg: { id: 'smg', name: 'K7 Viper', kind: 'smg', price: 1500, damage: 22, headMul: 2.5, mag: 28, reserve: 112, auto: true, gap: 0.075, reload: 1.9, spreadStill: 0.006, spreadMove: 0.034, recoil: 0.008, speed: 5.6, barrel: 0.3 },
-  rifle: { id: 'rifle', name: 'AR-77 Longarm', kind: 'rifle', price: 2700, damage: 34, headMul: 2.95, mag: 30, reserve: 90, auto: true, gap: 0.096, reload: 1.9, spreadStill: 0.0022, spreadMove: 0.028, recoil: 0.013, speed: 5.2, barrel: 0.4 },
+  // The rifle's recoil is an authored sequence, not pure noise: the first
+  // shots climb in a line a player can learn to pull down against, and the
+  // pattern resets once the trigger has been still for a beat.
+  rifle: { id: 'rifle', name: 'AR-77 Longarm', kind: 'rifle', price: 2700, damage: 34, headMul: 2.95, mag: 30, reserve: 90, auto: true, gap: 0.096, reload: 1.9, spreadStill: 0.0022, spreadMove: 0.028, recoil: 0.013, speed: 5.2, barrel: 0.4, pattern: [0.011, 0.012, 0.013, 0.014, 0.016, 0.017, 0.018, 0.019] },
   shotgun: { id: 'shotgun', name: 'M12 Breacher', kind: 'shotgun', price: 1700, damage: 12, headMul: 2.5, pellets: 9, mag: 6, reserve: 24, auto: false, gap: 0.85, reload: 2.6, spreadStill: 0.05, spreadMove: 0.09, recoil: 0.03, speed: 5.0, barrel: 0.42 },
   sniper: { id: 'sniper', name: 'L96 Longshot', kind: 'sniper', price: 4750, damage: 88, headMul: 2.5, mag: 5, reserve: 15, auto: false, gap: 1.1, reload: 3.2, spreadStill: 0.0008, spreadMove: 0.05, recoil: 0.05, speed: 4.6, barrel: 0.55 },
 };
 export const GRENADE = { id: 'grenade', name: 'HE Spark', price: 300 };
+export const SMOKE = { id: 'smoke', name: 'Smoke Veil', price: 200 };
+export const FLASH = { id: 'flash', name: 'Flash Pop', price: 200 };
+export const ARMOR = { id: 'armor', name: 'Vest Armor', price: 650 };
 export const BUY_ORDER = ['pistol', 'smg', 'shotgun', 'rifle', 'sniper'];
 
 function buildModel(def) {
@@ -67,7 +73,7 @@ export function createWeapons(camera) {
 
   const ammo = {};
   for (const def of Object.values(WEAPONS)) ammo[def.id] = { mag: def.mag, reserve: def.reserve, owned: def.price === 0 };
-  const state = { current: 'pistol', grenades: 0, cooldown: 0, reloadLeft: 0, flash: 0, kick: 0, bob: 0 };
+  const state = { current: 'pistol', grenades: 0, smoke: 0, flashes: 0, cooldown: 0, reloadLeft: 0, flash: 0, kick: 0, bob: 0, burst: 0, burstAt: 0 };
 
   function def() {
     return WEAPONS[state.current];
@@ -85,6 +91,8 @@ export function createWeapons(camera) {
   function step(dt, groundSpeed) {
     state.cooldown = Math.max(0, state.cooldown - dt);
     state.flash = Math.max(0, state.flash - dt);
+    state.burstAt += dt;
+    if (state.burstAt > 0.45) state.burst = 0;
     state.kick += (0 - state.kick) * Math.min(1, dt * 14);
     state.bob += dt * groundSpeed * 1.6;
     const model = models[state.current];
@@ -121,6 +129,17 @@ export function createWeapons(camera) {
       state.cooldown = def().gap;
       state.flash = 0.06;
       state.kick = 0.055;
+      state.burst += 1;
+      state.burstAt = 0;
+    },
+    // The pitch the next shot kicks: the rifle follows its authored pattern,
+    // every other gun kicks by its recoil with a little seeded noise.
+    recoilKick(random) {
+      const d = def();
+      if (d.pattern) {
+        return [d.pattern[Math.min(state.burst - 1, d.pattern.length - 1)], (random() * 2 - 1) * d.recoil * 0.3];
+      }
+      return [d.recoil * (0.9 + random() * 0.3), (random() * 2 - 1) * d.recoil * 0.3];
     },
     takeRound() {
       const slot = ammo[state.current];
@@ -149,6 +168,21 @@ export function createWeapons(camera) {
     addGrenade() {
       state.grenades = Math.min(2, state.grenades + 1);
     },
+    addUtility(kind) {
+      if (kind === 'smoke') state.smoke = Math.min(2, state.smoke + 1);
+      else if (kind === 'flash') state.flashes = Math.min(2, state.flashes + 1);
+    },
+    throwUtility(kind) {
+      if (kind === 'smoke' && state.smoke > 0) {
+        state.smoke -= 1;
+        return true;
+      }
+      if (kind === 'flash' && state.flashes > 0) {
+        state.flashes -= 1;
+        return true;
+      }
+      return false;
+    },
     throwGrenade() {
       if (state.grenades <= 0) return false;
       state.grenades -= 1;
@@ -162,10 +196,14 @@ export function createWeapons(camera) {
       }
       state.current = 'pistol';
       state.grenades = 0;
+      state.smoke = 0;
+      state.flashes = 0;
       state.cooldown = 0;
       state.reloadLeft = 0;
       state.flash = 0;
       state.kick = 0;
+      state.burst = 0;
+      state.burstAt = 0;
       for (const key of Object.keys(models)) models[key].visible = key === 'pistol';
     },
   };

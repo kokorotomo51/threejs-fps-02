@@ -5,7 +5,7 @@
 export function createInput(canvas, onLockChange) {
   const keys = new Set();
   const pressed = new Set();
-  const state = { keys, locked: false, firing: false, lookX: 0, lookY: 0 };
+  const state = { keys, locked: false, firing: false, aiming: false, lookX: 0, lookY: 0 };
   let clicked = false;
   // Reused edge buffers: the hot loop must not allocate a fresh array or
   // object every frame just to report what changed.
@@ -39,15 +39,22 @@ export function createInput(canvas, onLockChange) {
       state.firing = true;
       clicked = true;
     }
+    if (state.locked && event.button === 2) state.aiming = true;
   });
   window.addEventListener('mouseup', (event) => {
     if (event.button === 0) state.firing = false;
+    if (event.button === 2) state.aiming = false;
+  });
+  // The scope lives on the right button: never let the browser open its menu.
+  window.addEventListener('contextmenu', (event) => {
+    if (state.locked) event.preventDefault();
   });
   document.addEventListener('pointerlockchange', () => {
     state.locked = document.pointerLockElement === canvas;
     if (!state.locked) {
       keys.clear();
       state.firing = false;
+      state.aiming = false;
     }
     onLockChange(state.locked);
   });

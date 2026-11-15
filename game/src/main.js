@@ -3,14 +3,16 @@
 // roundEnd and matchEnd, and every number the judge reads lives in this file's
 // state or in the module that owns it. ?shot=start|play|plant|end with &seed=N
 // stages a deterministic frame for a capture, renders it twice, then freezes it
-// and sets window.__shotReady.
+// and sets window.__shotReady. Two random streams: `random` drives the sim
+// (spread, bots, damage), `cosmetic` drives shake and other look-only noise,
+// so changing a visual never changes a round.
 import * as THREE from 'three';
 import { PALETTE } from './palette.js';
 import { mulberry32 } from './rng.js';
 import { createWorld } from './world.js';
 import { createInput } from './input.js';
 import { createPlayer } from './player.js';
-import { createWeapons, WEAPONS, GRENADE, BUY_ORDER } from './weapons.js';
+import { createWeapons, WEAPONS, GRENADE, SMOKE, FLASH, ARMOR, BUY_ORDER } from './weapons.js';
 import { createGrenades } from './grenades.js';
 import { createCombat } from './combat.js';
 import { createBots } from './bots.js';
@@ -27,17 +29,21 @@ const params = new URLSearchParams(window.location.search);
 const shot = params.get('shot');
 const seed = Number.parseInt(params.get('seed') ?? '1', 10) || 1;
 const random = mulberry32(seed);
+const cosmetic = mulberry32(seed + 7919);
 
 const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.0;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
 document.getElementById('game').appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(PALETTE.canvas);
-scene.fog = new THREE.Fog(new THREE.Color(PALETTE.canvas), 26, 62);
+scene.background = new THREE.Color(PALETTE.sky);
+scene.fog = new THREE.Fog(new THREE.Color(PALETTE.sky), 30, 70);
 const camera = new THREE.PerspectiveCamera(74, window.innerWidth / window.innerHeight, 0.05, 160);
 scene.add(camera);
 
@@ -49,9 +55,10 @@ const hud = createHud();
 const player = createPlayer(world.colliders);
 const input = createInput(renderer.domElement, onLockChange);
 const economy = createEconomy();
-const grenades = createGrenades(scene, world.colliders, onGrenadeBlast);
+const grenades = createGrenades(scene, world.colliders, onGrenadeBlast, onFlashBlast);
 const bomb = createBomb(scene, sfx, onBombBlast);
-const bots = createBots(scene, world, combat, random, onPlayerDamage, onDefused, sfx);
+const bots = createBots(scene, world, combat, random, onPlayerDamage, onDefused, sfx,
+  (a, b) => grenades.blockedBySmoke(a, b, G.elapsed));
 const shootables = world.shootables.concat(bots.hitMeshes);
 
 const body = player.state;
@@ -70,17 +77,42 @@ const G = {
   elapsed: 0,
   kills: 0,
   shake: 0,
+  flash: 0,
   hearAt: 0,
   accumulator: 0,
   lastTime: performance.now(),
   frozen: false,
 };
 
+// The utility line under the ammo: what the player can still throw.
+function utilText() {
+  const parts = [];
+  if (weapons.state.grenades > 0) parts.push(`HE x${weapons.state.grenades}`);
+  if (weapons.state.smoke > 0) parts.push(`SMK x${weapons.state.smoke}`);
+  if (weapons.state.flashes > 0) parts.push(`FL x${weapons.state.flashes}`);
+  return parts.join(' · ');
+}
+
+function refreshAmmo() {
+  const slot = weapons.ammo[weapons.state.current];
+  hud.setAmmo(slot.mag, slot.reserve, weapons.def().name, utilText());
+}
+
+// What the buy menu marks owned: weapons, grenades by count, armor by vest.
+function buyOwned() {
+  const owned = Object.fromEntries(Object.entries(weapons.ammo).map(([id, a]) => [id, a.owned]));
+  owned.grenade = weapons.state.grenades > 0;
+  owned.smoke = weapons.state.smoke > 0;
+  owned.flash = weapons.state.flashes > 0;
+  owned.armor = body.armor > 0;
+  return owned;
+}
+
 function syncCamera() {
   camera.position.set(body.position.x, body.position.y + body.eye, body.position.z);
   if (G.shake > 0.001) {
-    camera.position.x += (random() - 0.5) * G.shake * 0.18;
-    camera.position.y += (random() - 0.5) * G.shake * 0.18;
+    camera.position.x += (cosmetic() - 0.5) * G.shake * 0.18;
+    camera.position.y += (cosmetic() - 0.5) * G.shake * 0.18;
   }
   camera.rotation.set(body.pitch, body.yaw, 0, 'YXZ');
 }
@@ -104,6 +136,7 @@ function onPlayerDamage(amount, fromPos) {
   if (G.phase !== 'play' || !body.alive) return;
   const died = player.damage(amount);
   hud.setHealth(body.health);
+  hud.setArmor(body.armor);
   hud.damageFlash();
   sfx.hurt();
   if (died) {
@@ -117,6 +150,21 @@ function onGrenadeBlast(center) {
   G.shake = Math.max(G.shake, 0.6);
   bots.hear(center.x, center.z, 45, G.elapsed);
   blastDamage(center, 6, 120);
+}
+
+// A flash pop: bots that could see it go blind, and the player is blinded by
+// how close it was, whether he faced it, and whether a wall stood between.
+function onFlashBlast(center) {
+  sfx.pop();
+  bots.flash(center, G.elapsed);
+  camera.getWorldDirection(camDir);
+  aimDir.copy(center).sub(camera.position);
+  const dist = aimDir.length();
+  if (dist > 24) return;
+  aimDir.divideScalar(dist || 1);
+  const facing = camDir.dot(aimDir) > 0 ? 1 : 0.4;
+  const blocked = combat.hitscan(camera.position, aimDir, world.shootables, dist);
+  if (!blocked) G.flash = Math.max(G.flash, Math.max(0, 1.15 - dist / 22) * facing);
 }
 
 function onBombBlast(center) {
@@ -193,13 +241,39 @@ function shoot(spread) {
   }
   sfx.shot(def.kind);
   weapons.pullTrigger();
-  player.recoil(def.recoil * (0.9 + random() * 0.3), (random() * 2 - 1) * def.recoil * 0.3);
+  const kick = weapons.recoilKick(random);
+  player.recoil(kick[0], kick[1]);
   bots.hear(body.position.x, body.position.z, 30, G.elapsed);
-  hud.setAmmo(weapons.ammo[weapons.state.current].mag, weapons.ammo[weapons.state.current].reserve, def.name, weapons.state.grenades);
+  refreshAmmo();
   return true;
 }
 
 function buyOrSelect(id) {
+  if (id === 'armor') {
+    if (body.armor >= 50) return;
+    if (!economy.canAfford(ARMOR.price)) {
+      sfx.deny();
+      return;
+    }
+    economy.spend(ARMOR.price);
+    player.buyArmor();
+    hud.setArmor(body.armor);
+    sfx.buy();
+    return;
+  }
+  if (id === 'smoke' || id === 'flash') {
+    const def = id === 'smoke' ? SMOKE : FLASH;
+    const owned = id === 'smoke' ? weapons.state.smoke : weapons.state.flashes;
+    if (owned >= 2) return;
+    if (!economy.canAfford(def.price)) {
+      sfx.deny();
+      return;
+    }
+    economy.spend(def.price);
+    weapons.addUtility(id);
+    sfx.buy();
+    return;
+  }
   if (id === 'grenade') {
     if (weapons.state.grenades >= 2) return;
     if (!economy.canAfford(GRENADE.price)) {
@@ -238,11 +312,12 @@ function setupRound() {
   G.shake = 0;
   syncCamera();
   hud.setHealth(body.health);
+  hud.setArmor(body.armor);
   hud.setMoney(economy.state.money);
   hud.setTimer(G.timer);
   hud.setScore(economy.state.vanguard, economy.state.sentinel, economy.state.round);
   const slot = weapons.ammo[weapons.state.current];
-  hud.setAmmo(slot.mag, slot.reserve, weapons.def().name, weapons.state.grenades);
+  hud.setAmmo(slot.mag, slot.reserve, weapons.def().name, utilText());
   hud.setBomb('none', 0, 0, 0);
   hud.hideBanner();
 }
@@ -253,7 +328,7 @@ function startBuy() {
   setupRound();
   hud.hideOverlay();
   hud.showBuy(economy.state.money, G.buyLeft);
-  hud.updateBuy(economy.state.money, G.buyLeft, Object.fromEntries(Object.entries(weapons.ammo).map(([id, a]) => [id, a.owned])));
+  hud.updateBuy(economy.state.money, G.buyLeft, buyOwned());
   if (document.pointerLockElement) document.exitPointerLock();
 }
 
@@ -268,6 +343,7 @@ function startRound() {
 function startMatch() {
   economy.resetMatch();
   weapons.reset();
+  player.clearArmor();
   G.kills = 0;
   startBuy();
 }
@@ -307,9 +383,8 @@ hud.onPlay(() => {
 hud.onBuy((id) => {
   if (G.phase === 'buy') {
     buyOrSelect(id);
-    hud.updateBuy(economy.state.money, G.buyLeft, Object.fromEntries(Object.entries(weapons.ammo).map(([id2, a]) => [id2, a.owned])));
-    const slot = weapons.ammo[weapons.state.current];
-    hud.setAmmo(slot.mag, slot.reserve, weapons.def().name, weapons.state.grenades);
+    hud.updateBuy(economy.state.money, G.buyLeft, buyOwned());
+    refreshAmmo();
   }
 });
 hud.onContinue(() => {
@@ -328,7 +403,7 @@ function step(dt) {
   player.step(dt, keys, weapons.def().speed / 5.2);
   weapons.step(dt, player.groundSpeed());
   bots.step(dt, G.elapsed, body, bomb.state.mode === 'planted', bomb.state.pos);
-  grenades.step(dt);
+  grenades.step(dt, G.elapsed);
   combat.step(dt);
   bots.syncPlayerBody(body);
 
@@ -348,17 +423,9 @@ function step(dt) {
         hud.setMoney(economy.state.money);
         hud.killFeed(`Bomb planted at site ${bomb.state.site.name}`);
         hud.banner('BOMB PLANTED', 'Defend it until it blows', true, 2600);
-        let nearest = null;
-        let best = Infinity;
-        for (const bot of bots.bots) {
-          if (!bot.alive) continue;
-          const d = bot.mover.position.distanceTo(bomb.state.pos);
-          if (d < best) {
-            best = d;
-            nearest = bot;
-          }
-        }
-        if (nearest) nearest.order = 'defuse';
+        // The retake is a pair: the nearest Sentinel defuses, the next one
+        // covers the site while he works.
+        bots.assignRetake(bomb.state.pos);
       }
     }
   }
@@ -378,6 +445,19 @@ function step(dt) {
   }
 }
 
+// One throw for every utility: HE from the grenade stock, smoke and flash
+// from their own. The throw leaves the camera along its aim, keeps half the
+// player's velocity, and never fires when the stock is empty.
+function throwUtility(kind) {
+  const ok = kind === 'he' ? weapons.throwGrenade() : weapons.throwUtility(kind);
+  if (!ok) return;
+  camera.getWorldDirection(camDir);
+  tmpVec.copy(camera.position).addScaledVector(camDir, 0.5);
+  grenades.throwFrom(tmpVec, camDir, body.velocity, kind);
+  sfx.throwPin();
+  refreshAmmo();
+}
+
 function frame(now) {
   requestAnimationFrame(frame);
   const dt = Math.min((now - G.lastTime) / 1000, 0.1);
@@ -387,7 +467,15 @@ function frame(now) {
     return;
   }
   const look = input.takeLook();
-  player.look(look.x, look.y);
+  // Scoped in with the sniper: the view narrows and the mouse slows down.
+  const scoped = G.phase === 'play' && body.alive && input.state.aiming && weapons.def().kind === 'sniper';
+  player.look(look.x * (scoped ? 0.35 : 1), look.y * (scoped ? 0.35 : 1));
+  const wantFov = scoped ? 26 : 74;
+  if (Math.abs(camera.fov - wantFov) > 0.1) {
+    camera.fov += (wantFov - camera.fov) * Math.min(1, dt * 14);
+    camera.updateProjectionMatrix();
+  }
+  hud.setScoped(scoped);
   syncCamera();
   // Consumed every frame so a click on a buy button never fires the next round.
   const clicked = input.takeClick();
@@ -395,7 +483,7 @@ function frame(now) {
   if (G.phase === 'play' && body.alive) {
     const def = weapons.def();
     if ((def.auto && input.state.firing) || (!def.auto && clicked)) {
-      if (weapons.ready()) shoot(weapons.spread(player.groundSpeed()));
+      if (weapons.ready()) shoot(weapons.spread(player.groundSpeed()) * (scoped ? 0.5 : 1));
       else if (weapons.ammo[weapons.state.current].mag === 0 && weapons.ammo[weapons.state.current].reserve > 0) {
         if (weapons.reload()) sfx.reload();
       } else if (weapons.ammo[weapons.state.current].mag === 0) sfx.dry();
@@ -407,34 +495,34 @@ function frame(now) {
       } else if (code.startsWith('Digit')) {
         const index = Number(code.slice(5)) - 1;
         if (index >= 0 && index < BUY_ORDER.length) {
-          if (weapons.select(BUY_ORDER[index])) {
-            const slot = weapons.ammo[weapons.state.current];
-            hud.setAmmo(slot.mag, slot.reserve, weapons.def().name, weapons.state.grenades);
-          }
+          if (weapons.select(BUY_ORDER[index])) refreshAmmo();
         }
-      } else if (code === 'KeyG' && weapons.throwGrenade()) {
-        camera.getWorldDirection(camDir);
-        tmpVec.copy(camera.position).addScaledVector(camDir, 0.5);
-        grenades.throwFrom(tmpVec, camDir, body.velocity);
-        sfx.throwPin();
-        const slot = weapons.ammo[weapons.state.current];
-        hud.setAmmo(slot.mag, slot.reserve, weapons.def().name, weapons.state.grenades);
+      } else if (code === 'KeyG') {
+        throwUtility('he');
+      } else if (code === 'KeyV') {
+        throwUtility('smoke');
+      } else if (code === 'KeyB') {
+        throwUtility('flash');
       }
     }
-    hud.setCrosshair(weapons.spread(player.groundSpeed()));
+    hud.setCrosshair(weapons.spread(player.groundSpeed()) * (scoped ? 0.5 : 1));
     // Ammo is pushed every frame: a reload finishes inside weapons.step,
     // with no input event to trigger a refresh, and setAmmo is cached so an
     // unchanged value costs no DOM write.
-    {
-      const slot = weapons.ammo[weapons.state.current];
-      hud.setAmmo(slot.mag, slot.reserve, weapons.def().name, weapons.state.grenades);
-    }
+    refreshAmmo();
     hud.setBomb(
       bomb.state.mode === 'planted' ? 'planted' : bomb.state.mode === 'planting' ? 'planting' : 'none',
       bomb.state.fuse,
       bomb.state.plantT / 3,
       bots.defuseProgress(),
     );
+  }
+
+  // Standing in smoke greys the screen out; a flash fades back over ~2 s.
+  if (G.phase === 'play') {
+    hud.setSmoke(grenades.smokeAt(camera.position, G.elapsed));
+    if (G.flash > 0) G.flash = Math.max(0, G.flash - dt / 2.2);
+    hud.setFlash(G.flash);
   }
 
   if (G.phase === 'buy') {
@@ -444,10 +532,13 @@ function frame(now) {
         const index = Number(code.slice(5)) - 1;
         if (index >= 0 && index < BUY_ORDER.length) buyOrSelect(BUY_ORDER[index]);
         else if (index === 5) buyOrSelect('grenade');
+        else if (index === 6) buyOrSelect('smoke');
+        else if (index === 7) buyOrSelect('flash');
+        else if (index === 8) buyOrSelect('armor');
       }
     }
     G.buyLeft -= dt;
-    hud.updateBuy(economy.state.money, Math.max(0, G.buyLeft), Object.fromEntries(Object.entries(weapons.ammo).map(([id, a]) => [id, a.owned])));
+    hud.updateBuy(economy.state.money, Math.max(0, G.buyLeft), buyOwned());
     if (G.buyLeft <= 0) startRound();
   }
 
@@ -486,12 +577,19 @@ function runShot(name) {
   hud.hideBanner();
   G.phase = 'play';
   if (name === 'start') {
+    // Foundry hero: bright gameplay, rifle up, a Sentinel holding site A.
     setupRound();
-    body.position.set(0.6, 0, 11);
+    economy.state.money = 3250;
+    weapons.give('rifle');
+    weapons.select('rifle');
+    body.position.set(-10, 0, 4);
+    bots.bots[0].mover.reset(-14, 0, -6);
+    bots.bots[1].mover.reset(-18, 0, -11);
     settle(10);
-    aimAt(new THREE.Vector3(0, 1.6, -8));
-    hud.showOverlay('start');
+    aimAt(bots.aimPoint(0));
+    hud.setMoney(3250);
   } else if (name === 'play') {
+    // Mid-lane fight: tracers out, a hit landing, a second bot in the open.
     setupRound();
     body.position.set(0, 0, 6);
     bots.bots[2].mover.reset(1.5, 0, -7);
@@ -504,42 +602,41 @@ function runShot(name) {
     settle(6);
     aimAt(bots.aimPoint(0));
     shoot(0);
-    settle(5);
+    settle(2);
   } else if (name === 'plant') {
+    // Silo post-plant: the bomb down with its lamp blinking, a smoke cloud
+    // over the site, a Sentinel retaking through it.
     setupRound();
-    body.position.set(-14.2, 0, -6.5);
-    bots.bots[3].mover.reset(-13.5, 0, -10.5);
+    body.position.set(13, 0, -5.5);
+    bots.bots[3].mover.reset(13, 0, -12);
+    bots.bots[3].order = 'defuse';
     settle(10);
-    const site = world.sites[0];
-    bomb.plantStart(site, site.center);
-    bomb.state.plantT = 2.1;
-    aimAt(new THREE.Vector3(-14.5, 0.8, -9.5));
-    hud.setBomb('planting', 0, 0.7, 0);
+    const site = world.sites[1];
+    bomb.forcePlant(site, site.center, G.elapsed);
+    // A mature cloud: staged 1.2 s into its life so the capture shows the
+    // smoke a real throw leaves over the site, not a wisp just forming.
+    grenades.spawnSmoke(new THREE.Vector3(17.5, 1, -10.5), G.elapsed - 1.2);
+    aimAt(new THREE.Vector3(16, 0.6, -9));
+    hud.setBomb('planted', 35, 0, 0.15);
+    hud.setTimer(35);
     settle(4);
   } else if (name === 'end') {
-    setupRound();
-    bots.bots.forEach((bot, i) => {
-      bot.mover.reset(-1.5 + i, 0, -2.5 - i * 0.5);
-      bot.alive = false;
-      bot.fall = 1;
-      bot.state = 'dead';
-      bot.group.rotation.x = -1.45;
-      bot.group.position.copy(bot.mover.position);
-      bot.group.position.y = -0.08;
-    });
-    economy.state.vanguard = 1;
-    economy.state.round = 2;
-    hud.setScore(1, 0, 2);
-    body.position.set(0, 0, 4);
-    aimAt(new THREE.Vector3(0, 1, -6));
-    hud.banner('ROUND WON', 'Site A cleared — Vanguard leads 1–0', true, 60000);
+    // Buy phase over a lit yard: real prices, owned guns, $3,200 to spend.
+    economy.state.money = 3200;
+    weapons.give('smg');
+    weapons.give('rifle');
+    weapons.addGrenade();
+    weapons.addUtility('smoke');
+    startBuy();
+    body.position.set(0, 0, 10);
+    aimAt(new THREE.Vector3(0, 1.5, -8));
     settle(5);
   }
-  const slot = weapons.ammo[weapons.state.current];
-  hud.setAmmo(slot.mag, slot.reserve, weapons.def().name, weapons.state.grenades);
+  refreshAmmo();
   hud.setHealth(body.health);
+  hud.setArmor(body.armor);
   hud.setMoney(economy.state.money);
-  hud.setTimer(G.timer);
+  hud.setTimer(bomb.state.mode === 'planted' ? bomb.state.fuse : G.timer);
   paintTwiceThenReady();
 }
 
@@ -569,6 +666,6 @@ hud.setHealth(100);
 hud.setMoney(800);
 hud.setTimer(ROUND_TIME);
 hud.setScore(0, 0, 1);
-hud.setAmmo(12, 48, 'P9 Sidearm', 0);
+hud.setAmmo(12, 48, 'P9 Sidearm', '');
 if (shot) runShot(shot);
 else requestAnimationFrame(frame);

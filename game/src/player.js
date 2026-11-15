@@ -1,6 +1,7 @@
 // The player: one body that moves, crouches, jumps and takes damage. Movement physics
 // lives in mover.js; this file only turns keys into a wish, tracks the eye and the
 // health, and knows the spawn. A weapon slows the player down through speedMod.
+// Vest armor, bought in the buy menu, soaks half of every hit until it is gone.
 import { createMover } from './mover.js';
 
 const RADIUS = 0.34;
@@ -24,6 +25,7 @@ export function createPlayer(colliders) {
     eye: STAND_EYE,
     crouching: false,
     health: 100,
+    armor: 0,
     alive: true,
   };
 
@@ -65,12 +67,24 @@ export function createPlayer(colliders) {
 
   function damage(amount) {
     if (!player.alive) return false;
-    player.health = Math.max(0, player.health - amount);
+    // Armor soaks half of a hit, point for point, until it is gone.
+    const soaked = Math.min(player.armor, Math.round(amount * 0.5));
+    player.armor -= soaked;
+    player.health = Math.max(0, player.health - (amount - soaked));
     if (player.health <= 0) {
       player.alive = false;
       return true;
     }
     return false;
+  }
+
+  function buyArmor() {
+    player.armor = 50;
+  }
+
+  // A new match starts unarmoured; between rounds the vest stays on.
+  function clearArmor() {
+    player.armor = 0;
   }
 
   function reset(spawn) {
@@ -91,6 +105,8 @@ export function createPlayer(colliders) {
     recoil,
     damage,
     reset,
+    buyArmor,
+    clearArmor,
     groundSpeed() {
       return mover.groundSpeed();
     },
