@@ -30,12 +30,22 @@
     font-family: var(--font-ui);
   }
   #game, #game canvas { position: fixed; inset: 0; display: block; }
-  #hud { position: fixed; inset: 0; pointer-events: none; }
+  #hud { position: fixed; inset: 0; pointer-events: none; text-shadow: 0 1px 3px rgba(0, 0, 0, 0.7); }
 
   #damage {
     position: fixed; inset: 0; pointer-events: none;
     background: radial-gradient(ellipse at center, transparent 55%, rgba(255, 90, 60, 0.55) 100%);
     opacity: 0; transition: opacity 300ms linear;
+  }
+  #smoke {
+    position: fixed; inset: 0; pointer-events: none;
+    background: radial-gradient(ellipse at center, rgba(154, 160, 164, 0.9) 30%, rgba(120, 126, 130, 0.95) 100%);
+    opacity: 0;
+  }
+  #flash {
+    position: fixed; inset: 0; pointer-events: none;
+    background: #fff;
+    opacity: 0;
   }
   #crosshair { position: fixed; left: 50%; top: 50%; width: 22px; height: 22px; transform: translate(-50%, -50%); --gap: 4px; }
   #crosshair i { position: absolute; background: var(--ink); opacity: .85; }
@@ -70,6 +80,7 @@
   #health-fill.low { background: var(--danger); }
   #health-line { display: flex; gap: 12px; font-size: 14px; }
   #health-num { color: var(--ink); }
+  #armor { color: var(--accent); }
   #money { color: var(--accent); }
 
   #bomb-status, #plant-status {
@@ -169,12 +180,14 @@
 
 <div id="hud" aria-hidden="true">
   <div id="damage"></div>
+  <div id="smoke"></div>
+  <div id="flash"></div>
   <div id="crosshair"><i></i><i></i><i></i><i></i></div>
   <div id="hitmarker"><i></i><i></i><i></i><i></i></div>
   <div id="topbar"><div id="timer">1:40</div><div id="round-score">V 0 — 0 S · R1</div></div>
   <div id="vitals">
     <div id="health-bar"><div id="health-fill"></div></div>
-    <div id="health-line"><span>HP <b id="health-num">100</b></span><span id="money">$800</span></div>
+    <div id="health-line"><span>HP <b id="health-num">100</b></span><span id="armor"></span><span id="money">$800</span></div>
   </div>
   <div id="bomb-status" hidden>BOMB <span id="bomb-timer">35.0</span><div id="bomb-bar"><div id="bomb-fill"></div></div></div>
   <div id="plant-status" hidden>PLANTING<div id="plant-bar"><div id="plant-fill"></div></div></div>
@@ -204,7 +217,8 @@
     <ul class="keys">
       <li><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> Move</li>
       <li><kbd>Mouse</kbd> Look</li>
-      <li><kbd>Click</kbd> Fire &nbsp; <kbd>R</kbd> Reload &nbsp; <kbd>G</kbd> Grenade</li>
+      <li><kbd>Click</kbd> Fire &nbsp; <kbd>R</kbd> Reload &nbsp; <kbd>Right-click</kbd> Scope</li>
+      <li><kbd>G</kbd> HE grenade &nbsp; <kbd>V</kbd> Smoke &nbsp; <kbd>B</kbd> Flash</li>
       <li><kbd>E</kbd> Plant / hold to plant the bomb</li>
       <li><kbd>1</kbd>–<kbd>5</kbd> Switch weapon</li>
       <li><kbd>Ctrl</kbd> Crouch &nbsp; <kbd>Space</kbd> Jump</li>
